@@ -134,6 +134,7 @@ ServoCalcs::ServoCalcs(ros::NodeHandle& nh, ServoParameters& parameters,
   num_joints_ = internal_joint_state_.name.size();
   internal_joint_state_.position.resize(num_joints_);
   internal_joint_state_.velocity.resize(num_joints_);
+  delta_theta_.setZero(num_joints_);
 
   // A map for the indices of incoming joint commands
   for (std::size_t i = 0; i < num_joints_; ++i)
@@ -152,6 +153,19 @@ ServoCalcs::ServoCalcs(ros::NodeHandle& nh, ServoParameters& parameters,
   empty_matrix.setZero();
   tf_moveit_to_ee_frame_ = empty_matrix;
   tf_moveit_to_robot_cmd_frame_ = empty_matrix;
+
+  // Get the IK solver for the group
+  ik_solver_ = joint_model_group_->getSolverInstance();
+  if (!ik_solver_)
+  {
+    use_inv_jacobian_ = true;
+    ROS_WARN_STREAM("No kinematics solver instantiated for group. Will use inverse Jacobian for servo calculations instead.");
+  }
+  else if (!ik_solver_->supportsGroup(joint_model_group_))
+  {
+    use_inv_jacobian_ = true;
+    ROS_WARN_STREAM("The loaded kinematics plugin does not support group. Will use inverse Jacobian for servo calculations instead.");
+  }
 }
 
 ServoCalcs::~ServoCalcs()
@@ -198,6 +212,12 @@ void ServoCalcs::start()
                            current_state_->getGlobalLinkTransform(parameters_.ee_frame_name);
   tf_moveit_to_robot_cmd_frame_ = current_state_->getGlobalLinkTransform(parameters_.planning_frame).inverse() *
                                   current_state_->getGlobalLinkTransform(parameters_.robot_link_command_frame);
+
+  if (!use_inv_jacobian_)
+  {
+    ik_base_to_tip_frame_ = current_state_->getGlobalLinkTransform(ik_solver_->getBaseFrame()).inverse() *
+                            current_state_->getGlobalLinkTransform(ik_solver_->getTipFrame());
+  }
 
   stop_requested_ = false;
   thread_ = std::thread([this] { mainCalcLoop(); });
@@ -305,6 +325,12 @@ void ServoCalcs::calculateSingleIteration()
   // Calculate this transform to ensure it is available via C++ API
   tf_moveit_to_ee_frame_ = current_state_->getGlobalLinkTransform(parameters_.planning_frame).inverse() *
                            current_state_->getGlobalLinkTransform(parameters_.ee_frame_name);
+
+  if (!use_inv_jacobian_)
+  {
+    ik_base_to_tip_frame_ = current_state_->getGlobalLinkTransform(ik_solver_->getBaseFrame()).inverse() *
+                            current_state_->getGlobalLinkTransform(ik_solver_->getTipFrame());
+  }
 
   have_nonzero_command_ = have_nonzero_twist_stamped_ || have_nonzero_joint_command_;
 
@@ -529,7 +555,70 @@ bool ServoCalcs::cartesianServoCalcs(geometry_msgs::TwistStamped& cmd,
   Eigen::MatrixXd matrix_s = svd.singularValues().asDiagonal();
   Eigen::MatrixXd pseudo_inverse = svd.matrixV() * matrix_s.inverse() * svd.matrixU().transpose();
 
-  delta_theta_ = pseudo_inverse * delta_x;
+  // Convert from cartesian commands to joint commands
+  // Use an IK solver plugin if we have one, otherwise use inverse Jacobian.
+  if (!use_inv_jacobian_)
+  {
+    // get a transformation matrix with the desired position change &
+    // get a transformation matrix with desired orientation change
+    Eigen::Isometry3d tf_pos_delta(Eigen::Isometry3d::Identity());
+    tf_pos_delta.translate(Eigen::Vector3d(delta_x[0], delta_x[1], delta_x[2]));
+
+    Eigen::Isometry3d tf_rot_delta(Eigen::Isometry3d::Identity());
+    Eigen::Quaterniond q = Eigen::AngleAxisd(delta_x[3], Eigen::Vector3d::UnitX()) *
+                           Eigen::AngleAxisd(delta_x[4], Eigen::Vector3d::UnitY()) *
+                           Eigen::AngleAxisd(delta_x[5], Eigen::Vector3d::UnitZ());
+    tf_rot_delta.rotate(q);
+
+    // Poses passed to IK solvers are assumed to be in some tip link (usually EE) reference frame
+    // First, find the new tip link position without newly applied rotation
+
+    auto tf_no_new_rot = tf_pos_delta * ik_base_to_tip_frame_;
+    // we want the rotation to be applied in the requested reference frame,
+    // but we want the rotation to be about the EE point in space, not the origin.
+    // So, we need to translate to origin, rotate, then translate back
+    // Given T = transformation matrix from origin -> EE point in space (translation component of tf_no_new_rot)
+    // and T' as the opposite transformation, EE point in space -> origin (translation only)
+    // apply final transformation as T * R * T' * tf_no_new_rot
+    auto tf_translation = tf_no_new_rot.translation();
+    auto tf_neg_translation = Eigen::Isometry3d::Identity();  // T'
+    tf_neg_translation(0, 3) = -tf_translation(0, 0);
+    tf_neg_translation(1, 3) = -tf_translation(1, 0);
+    tf_neg_translation(2, 3) = -tf_translation(2, 0);
+    auto tf_pos_translation = Eigen::Isometry3d::Identity();  // T
+    tf_pos_translation(0, 3) = tf_translation(0, 0);
+    tf_pos_translation(1, 3) = tf_translation(1, 0);
+    tf_pos_translation(2, 3) = tf_translation(2, 0);
+
+    // T * R * T' * tf_no_new_rot
+    auto tf = tf_pos_translation * tf_rot_delta * tf_neg_translation * tf_no_new_rot;
+    geometry_msgs::Pose next_pose = tf2::toMsg(tf);
+
+    // setup for IK call
+    std::vector<double> solution(num_joints_);
+    moveit_msgs::MoveItErrorCodes err;
+    kinematics::KinematicsQueryOptions opts;
+    opts.return_approximate_solution = true;
+    if (ik_solver_->searchPositionIK(next_pose, internal_joint_state_.position, parameters_.publish_period / 2.0,
+                                     solution, err, opts))
+    {
+      // find the difference in joint positions that will get us to the desired pose
+      for (size_t i = 0; i < num_joints_; ++i)
+      {
+        delta_theta_.coeffRef(i) = solution.at(i) - internal_joint_state_.position.at(i);
+      }
+    }
+    else
+    {
+      ROS_WARN_STREAM_THROTTLE(1, "Could not find IK solution for requested motion, got error code " << err.val);
+      return false;
+    }
+  }
+  else
+  {
+    // no supported IK plugin, use inverse Jacobian
+    delta_theta_ = pseudo_inverse * delta_x;
+  }
 
   enforceVelLimits(delta_theta_);
 
