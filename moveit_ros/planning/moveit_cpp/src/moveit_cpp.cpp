@@ -173,6 +173,10 @@ bool MoveItCpp::loadPlanningPipelines(const PlanningPipelineOptions& options)
           groups_pipelines_map_[group_name].insert(pipeline_entry.first);
         }
       }
+      if (pipeline_entry.first == "chomp")
+      {
+        groups_pipelines_map_[group_name].insert(pipeline_entry.first);
+      }
     }
   }
 
