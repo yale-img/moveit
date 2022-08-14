@@ -131,10 +131,10 @@ class MoveItControllerManager : public moveit_controller_manager::MoveItControll
       {
         active_controllers_.insert(std::make_pair(controller.name, controller));  // without namespace
       }
+      std::string absname = getAbsName(controller.name);
+      managed_controllers_.insert(std::make_pair(absname, controller));  // with namespace
       if (loader_.isClassAvailable(controller.type))
       {
-        std::string absname = getAbsName(controller.name);
-        managed_controllers_.insert(std::make_pair(absname, controller));  // with namespace
         allocate(absname, controller);
       }
     }
