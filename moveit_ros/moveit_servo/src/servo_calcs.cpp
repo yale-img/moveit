@@ -154,17 +154,25 @@ ServoCalcs::ServoCalcs(ros::NodeHandle& nh, ServoParameters& parameters,
   tf_moveit_to_ee_frame_ = empty_matrix;
   tf_moveit_to_robot_cmd_frame_ = empty_matrix;
 
-  // Get the IK solver for the group
-  ik_solver_ = joint_model_group_->getSolverInstance();
-  if (!ik_solver_)
+  if (!(parameters_.enable_ik_plugin))
   {
     use_inv_jacobian_ = true;
-    ROS_WARN_STREAM("No kinematics solver instantiated for group. Will use inverse Jacobian for servo calculations instead.");
+    ROS_WARN_NAMED(LOGNAME, "'enable_ik_plugin' set to false. Will use inverse Jacobian for servo calculations.");
   }
-  else if (!ik_solver_->supportsGroup(joint_model_group_))
+  else
   {
-    use_inv_jacobian_ = true;
-    ROS_WARN_STREAM("The loaded kinematics plugin does not support group. Will use inverse Jacobian for servo calculations instead.");
+    // Get the IK solver for the group
+    ik_solver_ = joint_model_group_->getSolverInstance();
+    if (!ik_solver_)
+    {
+      use_inv_jacobian_ = true;
+      ROS_WARN_NAMED(LOGNAME, "No kinematics solver instantiated for group %s. Will use inverse Jacobian for servo calculations instead.", joint_model_group_->getName().c_str());
+    }
+    else if (!ik_solver_->supportsGroup(joint_model_group_))
+    {
+      use_inv_jacobian_ = true;
+      ROS_WARN_NAMED(LOGNAME, "The loaded kinematics plugin does not support group %s. Will use inverse Jacobian for servo calculations instead.", joint_model_group_->getName().c_str());
+    }
   }
 }
 

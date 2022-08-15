@@ -170,6 +170,12 @@ bool Servo::readParameters()
     error += !rosparam_shortcuts::get(LOGNAME, nh, "warning_topic", parameters_.status_topic);
   }
 
+  if (!(nh.hasParam("enable_ik_plugin")))
+  {
+    ROS_WARN_NAMED(LOGNAME, "'enable_ik_plugin' not found; defaulting to inverse Jacobian method.");
+    parameters_.enable_ik_plugin = false;
+  }
+
   if (nh.hasParam("low_latency_mode"))
   {
     error += !rosparam_shortcuts::get(LOGNAME, nh, "low_latency_mode", parameters_.low_latency_mode);
