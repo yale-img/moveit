@@ -108,6 +108,17 @@ class MoveItControllerManager : public moveit_controller_manager::MoveItControll
   }
 
   /**
+   * \brief Check if given controller is default. Assumes JointTrajectoryController is default,
+   * any other is not default
+   * @param s state of controller
+   * @return true if controller is default
+   */
+  static bool isDefault(const controller_manager_msgs::ControllerState& s)
+  {
+    return s.type == std::string("position_controllers/JointTrajectoryController");
+  }
+
+  /**
    * \brief  Call list_controllers and populate managed_controllers_ and active_controllers_. Allocates handles if
    * needed.
    * Throttled down to 1 Hz, controllers_mutex_ must be locked externally
@@ -287,6 +298,7 @@ public:
     if (it != managed_controllers_.end())
     {
       c.active_ = isActive(it->second);
+      c.default_ = isDefault(it->second);
     }
     return c;
   }
