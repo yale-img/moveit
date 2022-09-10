@@ -1,7 +1,8 @@
 /*********************************************************************
  * Software License Agreement (BSD License)
  *
- *  Copyright (c) 2016, CITEC, Bielefeld University
+ *  Copyright (c) 2020, Benjamin Scholz
+ *  Copyright (c) 2021, Thies Oelerich
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -14,7 +15,7 @@
  *     copyright notice, this list of conditions and the following
  *     disclaimer in the documentation and/or other materials provided
  *     with the distribution.
- *   * Neither the name of Willow Garage nor the names of its
+ *   * Neither the name of the authors nor the names of other
  *     contributors may be used to endorse or promote products derived
  *     from this software without specific prior written permission.
  *
@@ -32,45 +33,21 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-/* Author: Robert Haschke */
+/* Authors: Benjamin Scholz, Thies Oelerich */
 
 #pragma once
 
-#include <QAbstractTableModel>
-#include <srdfdom/srdf_writer.h>
-
-#ifndef Q_MOC_RUN
-#include <moveit/setup_assistant/tools/compute_default_collisions.h>
-#endif
-
-class QItemSelection;
-
-class CollisionMatrixModel : public QAbstractTableModel
+#include <moveit/macros/class_forward.h>
+#include <string>
+namespace trajectory_processing
 {
-  Q_OBJECT
-public:
-  CollisionMatrixModel(const srdf::SRDFWriterPtr& srdf, const std::vector<std::string>& names,
-                       QObject* parent = nullptr);
-  int rowCount(const QModelIndex& parent = QModelIndex()) const override;
-  int columnCount(const QModelIndex& parent = QModelIndex()) const override;
-  QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
-  QVariant headerData(int section, Qt::Orientation orientation, int role) const override;
+MOVEIT_CLASS_FORWARD(RobotTrajectory);
+}  // namespace trajectory_processing
 
-  // for editing
-  Qt::ItemFlags flags(const QModelIndex& index) const override;
-  bool setData(const QModelIndex& /*index*/, const QVariant& value, int role) override;
-  void setEnabled(const QItemSelection& selection, bool value);
-  void setEnabled(const QModelIndexList& indexes, bool value);
-
-public Q_SLOTS:
-  void setFilterRegExp(const QString& filter);
-
-private:
-  bool disabledByDefault(const std::string& link1, const std::string& link2) const;
-
-private:
-  srdf::SRDFWriterPtr srdf;
-  const std::vector<std::string> std_names;  // names of links
-  QList<QString> q_names;                    // names of links
-  QList<int> visual_to_index;                // map from visual index to actual index
-};
+namespace trajectory_processing
+{
+bool limitMaxCartesianLinkSpeed(robot_trajectory::RobotTrajectory& trajectory, const double speed,
+                                const moveit::core::LinkModel* link_model);
+bool limitMaxCartesianLinkSpeed(robot_trajectory::RobotTrajectory& trajectory, const double speed,
+                                const std::string& link_name = "");
+}  // namespace trajectory_processing
