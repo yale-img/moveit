@@ -59,9 +59,6 @@
 #include <tf2_eigen/tf2_eigen.h>
 #include <trajectory_msgs/JointTrajectory.h>
 
-// moveit_core
-#include <moveit/kinematics_base/kinematics_base.h>
-
 // moveit_servo
 #include <moveit_servo/servo_parameters.h>
 #include <moveit_servo/status_codes.h>
@@ -320,9 +317,5 @@ private:
   // input condition variable used for low latency mode
   std::condition_variable input_cv_;
   bool new_input_cmd_ = false;
-
-  kinematics::KinematicsBaseConstPtr ik_solver_;
-  Eigen::Isometry3d ik_base_to_tip_frame_;
-  bool use_inv_jacobian_ = false;
 };
 }  // namespace moveit_servo

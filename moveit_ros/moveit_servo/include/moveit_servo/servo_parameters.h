@@ -80,7 +80,6 @@ struct ServoParameters
   double self_collision_proximity_threshold;
   double collision_distance_safety_factor;
   double min_allowable_collision_distance;
-  bool enable_ik_plugin;
 };
 
 }  // namespace moveit_servo
