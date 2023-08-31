@@ -86,7 +86,13 @@ bool Servo::readParameters()
 {
   std::size_t error = 0;
 
-  ros::NodeHandle nh("~");  // Load all parameters w.r.t. to node's private namespace
+  // Optional parameter sub-namespace specified in the launch file. All other parameters will be read from this namespace.
+  std::string parameter_ns;
+  ros::param::get("~parameter_ns", parameter_ns);
+
+  // If parameters have been loaded into sub-namespace within the node namespace, append the parameter namespace
+  // to load the parameters correctly.
+  ros::NodeHandle nh = parameter_ns.empty() ? nh_ : ros::NodeHandle(nh_, parameter_ns);
 
   error += !rosparam_shortcuts::get(LOGNAME, nh, "publish_period", parameters_.publish_period);
   error += !rosparam_shortcuts::get(LOGNAME, nh, "collision_check_rate", parameters_.collision_check_rate);
@@ -174,6 +180,8 @@ bool Servo::readParameters()
                             "input.  Setting to the default value of false.");
     parameters_.low_latency_mode = false;
   }
+
+  error += !rosparam_shortcuts::get(LOGNAME, nh, "enable_ik_plugin", parameters_.enable_ik_plugin);
 
   rosparam_shortcuts::shutdownIfError(LOGNAME, error);
 
