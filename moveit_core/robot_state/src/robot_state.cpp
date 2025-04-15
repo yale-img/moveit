@@ -132,6 +132,11 @@ void RobotState::initTransforms()
                            robot_model_->getLinkGeometryCount();
        i != end; ++i)
     variable_joint_transforms_[i].makeAffine();
+
+  // Initialize fixed joints because they are not computed later by update().
+  for (const JointModel* joint : robot_model_->getJointModels())
+    if (joint->getType() == JointModel::FIXED)
+      getJointTransform(joint);
 }
 
 RobotState& RobotState::operator=(const RobotState& other)
@@ -806,39 +811,38 @@ const LinkModel* RobotState::getRigidlyConnectedParentLinkModel(const std::strin
 {
   const moveit::core::LinkModel* link{ nullptr };
 
-  size_t idx = 0;
-  if ((idx = frame.find('/')) != std::string::npos)
-  {  // resolve sub frame
-    std::string object{ frame.substr(0, idx) };
-    if (!hasAttachedBody(object))
-      return nullptr;
-    auto body{ getAttachedBody(object) };
-    bool found = false;
-    if (transform)
-      *transform = body->getSubframeTransform(frame, &found);
-    else
-      body->getSubframeTransform(frame, &found);
-    if (!found)
-      return nullptr;
-    if (transform)  // prepend the body transform
-      *transform = body->getPose() * *transform;
-    link = body->getAttachedLink();
-  }
-  else if (hasAttachedBody(frame))
-  {
-    auto body{ getAttachedBody(frame) };
-    if (transform)
-      *transform = body->getPose();
-    link = body->getAttachedLink();
-  }
-  else if (getRobotModel()->hasLinkModel(frame))
+  if (getRobotModel()->hasLinkModel(frame))
   {
     link = getLinkModel(frame);
     if (transform)
       transform->setIdentity();
-    if (!link)
+  }
+  else if (const auto it = attached_body_map_.find(frame); it != attached_body_map_.end())
+  {
+    const auto& body{ it->second };
+    link = body->getAttachedLink();
+    if (transform)
+      *transform = body->getPose();
+  }
+  else
+  {
+    bool found = false;
+    for (const auto& it : attached_body_map_)
+    {
+      const auto& body{ it.second };
+      const Eigen::Isometry3d& subframe = body->getSubframeTransform(frame, &found);
+      if (found)
+      {
+        if (transform)  // prepend the body transform
+          *transform = body->getPose() * subframe;
+        link = body->getAttachedLink();
+        break;
+      }
+    }
+    if (!found)
       return nullptr;
   }
+
   // link is valid and transform describes pose of frame w.r.t. global frame
   Eigen::Isometry3d link_transform;
   auto* parent = getRobotModel()->getRigidlyConnectedParentLinkModel(link, link_transform, jmg);
@@ -1409,6 +1413,78 @@ bool RobotState::getJacobian(const JointModelGroup* group, const LinkModel* link
   return true;
 }
 
+bool RobotState::getJacobianDerivative(const JointModelGroup* group, const LinkModel* link,
+                                       const Eigen::Vector3d& reference_point_position, Eigen::MatrixXd& jacobian,
+                                       Eigen::MatrixXd& jacobian_derivative) const
+{
+  const int rows = 6;
+  const int columns = group->getVariableCount();
+  jacobian_derivative.setZero(rows, columns);
+
+  // Calculate the Jacobian with use_quaternion_representation = false
+  if (!getJacobian(group, link, reference_point_position, jacobian, false))
+  {
+    ROS_ERROR_NAMED(LOGNAME, "Jacobian computation failed");
+    return false;
+  }
+
+  auto velocities = getJointVelocities(group->getJointModels()[0]);
+
+  while (link)
+  {
+    const JointModel* pjm = link->getParentJointModel();
+    if (pjm->getVariableCount() > 0)
+    {
+      if (!group->hasJointModel(pjm->getName()))
+      {
+        link = pjm->getParentLinkModel();
+        continue;
+      }
+      unsigned int current_joint_index = group->getVariableGroupIndex(pjm->getName());
+      if (pjm->getType() == moveit::core::JointModel::REVOLUTE || pjm->getType() == moveit::core::JointModel::PRISMATIC)
+      {
+        // iterate over all joints, pd_joint_index - partial derivative joint index
+        for (unsigned int pd_joint_index = 0; pd_joint_index < group->getVariableCount(); pd_joint_index++)
+        {
+          jacobian_derivative.col(current_joint_index) +=
+              getJacobianColumnPartialDerivative(jacobian, current_joint_index, pd_joint_index) *
+              velocities[pd_joint_index];
+        }
+      }
+      else
+        ROS_ERROR_NAMED(LOGNAME, "Unsupported type of joint in Jacobian derivative computation");
+    }
+    if (pjm == group->getJointModels()[0])
+      break;
+    link = pjm->getParentLinkModel();
+  }
+  return true;
+}
+
+Eigen::Matrix<double, 6, 1> RobotState::getJacobianColumnPartialDerivative(const Eigen::MatrixXd& jacobian,
+                                                                           int column_index, int joint_index)
+{
+  // Twist is [v omega]^T
+  const Eigen::Matrix<double, 6, 1>& jac_j = jacobian.col(joint_index);
+  const Eigen::Matrix<double, 6, 1>& jac_i = jacobian.col(column_index);
+
+  Eigen::Matrix<double, 6, 1> t_djdq = Eigen::Matrix<double, 6, 1>::Zero();
+
+  if (joint_index <= column_index)
+  {
+    // ref (20)
+    const Eigen::Vector3d& jac_j_angular = jac_j.segment<3>(3);
+    t_djdq.segment<3>(0) = jac_j_angular.cross(jac_i.segment<3>(0));
+    t_djdq.segment<3>(3) = jac_j_angular.cross(jac_i.segment<3>(3));
+  }
+  else if (joint_index > column_index)
+  {
+    // ref (23)
+    t_djdq.segment<3>(0) = -jac_j.segment<3>(0).cross(jac_i.segment<3>(3));
+  }
+  return t_djdq;
+}
+
 bool RobotState::setFromDiffIK(const JointModelGroup* jmg, const Eigen::VectorXd& twist, const std::string& tip,
                                double dt, const GroupStateValidityCallbackFn& constraint)
 {
@@ -1864,8 +1940,8 @@ bool RobotState::setFromIKSubgroups(const JointModelGroup* jmg, const EigenSTL::
   {
     if (consistency_limits[i].size() != sub_groups[i]->getVariableCount())
     {
-      ROS_ERROR_NAMED(LOGNAME, "Number of joints in consistency_limits is %zu but it should be should be %u", i,
-                      sub_groups[i]->getVariableCount());
+      ROS_ERROR_NAMED(LOGNAME, "Number of joints in consistency_limits[%zu] is %zu but it should be should be %u", i,
+                      consistency_limits[i].size(), sub_groups[i]->getVariableCount());
       return false;
     }
   }
@@ -2021,39 +2097,6 @@ bool RobotState::setFromIKSubgroups(const JointModelGroup* jmg, const EigenSTL::
     first_seed = false;
   } while (elapsed < timeout);
   return false;
-}
-
-double RobotState::computeCartesianPath(const JointModelGroup* group, std::vector<RobotStatePtr>& traj,
-                                        const LinkModel* link, const Eigen::Vector3d& direction,
-                                        bool global_reference_frame, double distance, double max_step,
-                                        double jump_threshold_factor, const GroupStateValidityCallbackFn& validCallback,
-                                        const kinematics::KinematicsQueryOptions& options)
-{
-  return CartesianInterpolator::computeCartesianPath(this, group, traj, link, direction, global_reference_frame,
-                                                     distance, MaxEEFStep(max_step),
-                                                     JumpThreshold(jump_threshold_factor), validCallback, options);
-}
-
-double RobotState::computeCartesianPath(const JointModelGroup* group, std::vector<RobotStatePtr>& traj,
-                                        const LinkModel* link, const Eigen::Isometry3d& target,
-                                        bool global_reference_frame, double max_step, double jump_threshold_factor,
-                                        const GroupStateValidityCallbackFn& validCallback,
-                                        const kinematics::KinematicsQueryOptions& options)
-{
-  return CartesianInterpolator::computeCartesianPath(this, group, traj, link, target, global_reference_frame,
-                                                     MaxEEFStep(max_step), JumpThreshold(jump_threshold_factor),
-                                                     validCallback, options);
-}
-
-double RobotState::computeCartesianPath(const JointModelGroup* group, std::vector<RobotStatePtr>& traj,
-                                        const LinkModel* link, const EigenSTL::vector_Isometry3d& waypoints,
-                                        bool global_reference_frame, double max_step, double jump_threshold_factor,
-                                        const GroupStateValidityCallbackFn& validCallback,
-                                        const kinematics::KinematicsQueryOptions& options)
-{
-  return CartesianInterpolator::computeCartesianPath(this, group, traj, link, waypoints, global_reference_frame,
-                                                     MaxEEFStep(max_step), JumpThreshold(jump_threshold_factor),
-                                                     validCallback, options);
 }
 
 void RobotState::computeAABB(std::vector<double>& aabb) const
@@ -2236,6 +2279,9 @@ void RobotState::printTransforms(std::ostream& out) const
   const std::vector<const JointModel*>& jm = robot_model_->getJointModels();
   for (const JointModel* joint : jm)
   {
+    if (joint->getType() == JointModel::FIXED)
+      continue;
+
     out << "  " << joint->getName();
     const int idx = joint->getJointIndex();
     if (dirty_joint_transforms_[idx])
